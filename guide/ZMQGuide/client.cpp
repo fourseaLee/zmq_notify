@@ -4,6 +4,8 @@
 #include "util.h"
 #include <sstream>
 #include <unistd.h>
+#include <unordered_map>
+
 
 void hwclient()
 {
@@ -38,6 +40,7 @@ static zmq::socket_t* ClientSocket(zmq::context_t& context)
     return client;
 }
 
+
 void lpclient()
 {
     zmq::context_t context(1);
@@ -45,6 +48,15 @@ void lpclient()
 
     int sequence = 0;
     int retries_left = REQUEST_RETRIES;
+
+
+    //zmq::socket_base_t *s = static_cast<zmq::socket_base_t *> (client);
+
+    //if (!s->check_tag ()) {
+     //  std::cout << " -----------------------------------" <<std::endl;
+    //}
+
+
     while(retries_left)
     {
         std::stringstream request;
@@ -56,7 +68,11 @@ void lpclient()
         while(expect_reply)
         {
             //zmq::pollitem_t items[] = {{*client, 0, ZMQ_POLLIN, 0}};
-            zmq::pollitem_t items[] = { { client, 0, ZMQ_POLLIN, 0 } };
+            zmq::pollitem_t items[1];// = { { client, 0, ZMQ_POLLIN, 0 } };
+            items[0].socket = *client;
+            items[0].events = ZMQ_POLLIN;
+            items[0].fd = 0;
+            items[0].revents = 0;
             zmq::poll(&items[0], 1, REQUEST_TIMEOUT * 1000);
 
             if(items[0].revents & ZMQ_POLLIN)
@@ -92,9 +108,75 @@ void lpclient()
 
 }
 
+
+#define NBR_CLIENTS 10
+#define NBR_WORKERS 3
+#define WORKER_READY "READY"
+void lvcache()
+{
+    zmq::context_t context(1);
+    zmq::socket_t frontend(context ,ZMQ_SUB);
+    zmq::socket_t backend(context, ZMQ_XPUB);
+
+    frontend.connect("tcp://localhost:5557");
+    backend.bind("tcp://*:5558");
+
+    frontend.setsockopt(ZMQ_SUBSCRIBE, "", 0);
+
+    std::unordered_map<std::string, std::string> cache_map;
+
+    zmq::pollitem_t items[2] ={
+      {frontend, 0, ZMQ_POLLIN,0},
+      {backend, 0, ZMQ_POLLIN, 0}
+    };
+
+    while (1)
+    {
+        if(zmq::poll(items, 2, 1000) == -1)
+            break;
+        if(items[0].revents&ZMQ_POLLIN)
+        {
+            std::string topic = RecieveMessage(frontend);
+            std::string data = RecieveMessage(frontend);
+
+            if(topic.empty())
+                break;
+
+            cache_map[topic] = data;
+            SendMore(backend,topic);
+            SendMessage(backend,data);
+        }
+
+        if (items[1].revents & ZMQ_POLLIN)
+        {
+            zmq::message_t msg;
+            backend.recv(&msg);
+            if(msg.size() == 0)
+                break;
+
+            uint8_t* event = (uint8_t *)msg.data();
+
+            if(event[0] == 1)
+            {
+                std::string topic((char*)(event+1),msg.size()-1);
+                auto i = cache_map.find(topic);
+
+                if(i != cache_map.end())
+                {
+                    SendMore(backend,topic);
+                    SendMessage(backend,i->second);
+                }
+            }
+        }
+    }
+}
+
+
+
 int main()
 {
     //hwclient();
-    lpclient();
+    //lpclient();
+    lvcache();
     return 0;
 }

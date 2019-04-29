@@ -28,4 +28,5 @@ unix:!macx: LIBS += -lzmq
 unix:!macx: LIBS += -lpthread
 
 HEADERS += \
-    util.h
+    util.h \
+    zmsg.h

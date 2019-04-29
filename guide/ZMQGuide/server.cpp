@@ -4,6 +4,8 @@
 #include "util.h"
 #include <unistd.h>
 #include <iostream>
+#include <queue>
+#include <pthread.h>
 
 void hwserver()
 {
@@ -47,13 +49,159 @@ void lpcserver()
         sleep(1);
         SendMessage(server, request);
     }
+}
+
+void identity()
+{
+    zmq::context_t context(1);
+    zmq::socket_t sink(context, ZMQ_ROUTER);
+    sink.bind("inproc://example");
+
+    zmq::socket_t anonymous(context,ZMQ_REQ);
+    anonymous.connect("inproc://example");
+
+    SendMessage(anonymous, "ROUTER uses a generated 5 byte identity");
+    socketDump(sink);
+
+    zmq::socket_t identified(context, ZMQ_REQ);
+    identified.setsockopt(ZMQ_IDENTITY, "PEER2", 5);
+    identified.connect("inproc://example");
+
+    SendMessage(identified, "ROUTER socket uses REQ's socket identity");
+    socketDump(sink);
 
 }
+static void* clientThread(void* arg)
+{
+    zmq::context_t context(1);
+    zmq::socket_t client(context, ZMQ_REQ);
+    socketSetId(client);
+    client.connect("ipc://frontend.ipc");
+    SendMessage(client, "HELLO");
+    std::string reply = RecieveMessage(client);
+    std::cout << "client: " << reply << std::endl;
+    return (NULL);
+}
+
+static void* workerThread(void* arg)
+{
+    zmq::context_t context(1);
+    zmq::socket_t worker(context, ZMQ_REQ);
+
+    socketSetId(worker);
+    worker.connect("ipc://backend.ipc");
+
+    SendMessage(worker, "READY");
+    while (1)
+    {
+        std::string address = RecieveMessage(worker);
+        {
+            std::string empty = RecieveMessage(worker);
+            assert(empty.size() == 0);
+        }
+        std::string request = RecieveMessage(worker);
+        std::cout  << "Worker: " << request << std::endl;
+
+        SendMore(worker, address);
+        SendMore(worker, "");
+        SendMore(worker, "OK");
+    }
+    return (NULL);
+}
+
+void broker()
+{
+    zmq::context_t context(1);
+    zmq::socket_t frontend(context, ZMQ_ROUTER);
+    zmq::socket_t backend(context, ZMQ_ROUTER);
+
+    frontend.bind("ipc://frontend.ipc");
+    backend.bind("ipc://backend.ipc");
+
+    int client_nbr;
+    for(client_nbr =0; client_nbr < 10; client_nbr++)
+    {
+        pthread_t client ;
+        pthread_create(&client, NULL, clientThread, (void*)(intptr_t)client_nbr);
+    }
+
+    int worker_nbr;
+    for(worker_nbr = 0; worker_nbr < 3; worker_nbr ++)
+    {
+        pthread_t worker;
+        pthread_create(&worker, NULL, workerThread, (void *)(intptr_t)worker_nbr);
+    }
+
+    std::queue<std::string> worker_queue;
+
+    while (1)
+    {
+        zmq::pollitem_t items[] =
+        {
+            {backend, 0, ZMQ_POLLIN, 0},
+            {frontend, 0, ZMQ_POLLIN, 0}
+        };
+
+        if(worker_queue.size())
+            zmq::poll(&items[0], 2, -1);
+        else
+            zmq::poll(&items[1],1, -1);
+
+
+        if(items[0].revents & ZMQ_POLLIN)
+        {
+            worker_queue.push(RecieveMessage(backend));
+            {
+                std::string empty =RecieveMessage(backend);
+                assert(empty.size() == 0);
+            }
+
+            std::string  client_addr = RecieveMessage(backend);
+
+            if(client_addr.compare("READY") != 0)
+            {
+                {
+                    std::string empty = RecieveMessage(backend);
+                    assert(empty.size() == 0);
+                }
+                std::string reply = RecieveMessage(backend);
+                SendMore(frontend, client_addr);
+                SendMore(frontend, "");
+                SendMessage(frontend,reply);
+                if(--client_nbr == 0)
+                    break;
+            }
+        }
+
+        if(items[1].revents & ZMQ_POLLIN)
+        {
+            std::string client_addr = RecieveMessage(frontend);
+            {
+                std::string empty = RecieveMessage(frontend);
+                assert(empty.size() == 0);
+            }
+
+            std::string request = RecieveMessage(frontend);
+            std::string worker_addr = worker_queue.front();
+            worker_queue.pop();
+            SendMore(backend,worker_addr);
+            SendMore(backend,"");
+            SendMore(backend,client_addr);
+            SendMore(backend,"");
+            SendMessage(backend,request);
+        }
+    }
+}
+
+
+
 int main(int argc, char *argv[])
 {
 //    QCoreApplication a(argc, argv);
-//    hwserver();
-      lpcserver();
-//    return a.exec();
+//   hwserver();
+//      lpcserver();
+    //   identity();
+    //    return a.exec();
+    broker();
     return 0;
 }
